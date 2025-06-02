@@ -155,35 +155,35 @@ extern "C" __declspec(dllexport) void call_qpe_kernel(double* data, int nAll, in
 #pragma region mlae
 
 __device__ double mleForMlaeLog(int length,
-	int* Ms, int* Rs, int* Hs, int precision) {
-	int sameBysCount = 0, est = 0;
+	int* Ms, int* Rs, int* Hs, int precision, double* etaPows, double* cosCache) {
+	int est = 0;
 	double maxLogP = -__DBL_MAX__;
-	for (int test = 0; test <= precision; test++)
+	for (int testIdx = 0; testIdx <= precision; testIdx++)
 	{
-		double iAngle = asin(sqrt((double)test / precision)), logP = 0;
+		double iAngle = asin(sqrt((double)testIdx / precision)), logP = 0;
 		for (int t = 0; t < length; t++)
 		{
-			double sin2 = pow2(sin(iAngle * Ms[t]));
-			if (Hs[t])
-				logP += Hs[t] * log(sin2);
-			if (Rs[t] - Hs[t])
-				logP += (Rs[t] - Hs[t]) * log(1 - sin2);
+			double p1 = (1 - etaPows[Ms[t]] * cosCache[(precision + 1) * Ms[t] + testIdx]) / 2;
+			// if (Hs[t])
+				logP += Hs[t] * log(p1);
+			// if (Rs[t] - Hs[t])
+				logP += (Rs[t] - Hs[t]) * log(1 - p1);
 		}
 		if (logP > maxLogP) {
-			est = test;
+			est = testIdx;
 			maxLogP = logP;
-			sameBysCount = 1;
+			// sameBysCount = 1;
 		}
-		else if (logP == maxLogP) {
-			est = (est * sameBysCount + (double)test / precision);
-			est /= ++sameBysCount;
-		}
+		// else if (logP == maxLogP) {
+		// 	est = (est * sameBysCount + (double)testIdx / precision);
+		// 	est /= ++sameBysCount;
+		// }
 	}
 	return (double)est / precision;
 }
 
 __global__ void mlae_kernel(double* data, int nAll,
-	int length, int* Ms, int* Rs, int precision, int* freeMem)
+	int length, int* Ms, int* Rs, int precision, int* freeMem, double* etaPows, double* cosCache)
 {
 	int kernelIdx = threadIdx.x + blockIdx.x * blockDim.x;
     curandState ref_rd, * rd = &ref_rd;
@@ -196,19 +196,42 @@ __global__ void mlae_kernel(double* data, int nAll,
 		{
 			Hs[t] = binarySample(pow2(sin(angle * Ms[t])), Rs[t], rd);
 		}
-		data[dataIdx] = mleForMlaeLog(length, Ms, Rs, Hs, precision);
+		data[dataIdx] = mleForMlaeLog(length, Ms, Rs, Hs, precision, etaPows, cosCache);
 	}
 }
 
 extern "C" __declspec(dllexport) void call_mlae_kernel(double* data, int nAll,
-	int length, int* Ms, int* Rs, int precision)
+	int length, int* Ms, int* Rs, double eta, int precision)
 {
 	double* d_data = copyDoubleArr(nAll, data);
 	int* d_Ms = copyIntArr(length, Ms);
 	int* d_Rs = copyIntArr(length, Rs);
 	int* freeMem = (int*)mallocArr(TOTAL_THREAD_NUM * length * sizeof(int));
 
-	mlae_kernel __KERNEL_ARGS__ (d_data, nAll, length, d_Ms, d_Rs, precision, freeMem);
+	int maxM = 0;
+	for (int i = 0; i < length; i++)
+	{
+		if (Ms[i] > maxM) {
+			maxM = Ms[i];
+		}
+	}
+	double* d_etas = (double*)mallocArrManaged(sizeof(double) * (maxM + 1));
+	double* d_cosCache = (double*)mallocArrManaged(sizeof(double) * (maxM + 1) * (precision + 1));
+	double* angles = (double*)malloc(sizeof(double) * (precision + 1));
+	for (int i = 0; i <= precision; i++)
+	{
+		angles[i] = asin(sqrt((double)i / precision));
+	}
+	for (int M = 0; M < maxM + 1; M++)
+	{
+		d_etas[M] = pow(eta, 2*M);
+		for (int j = 0; j <= precision; j++)
+		{
+			d_cosCache[M * (precision + 1) + j] = cos(2 * M * angles[j]);
+		}
+	}
+
+	mlae_kernel __KERNEL_ARGS__ (d_data, nAll, length, d_Ms, d_Rs, precision, freeMem, d_etas, d_cosCache);
 	checkCudaErrors(cudaMemcpy(data, d_data, sizeof(double) * nAll, cudaMemcpyDeviceToHost));
 	checkCudaErrors(cudaDeviceReset());
 }
@@ -335,34 +358,35 @@ extern "C" __declspec(dllexport) void call_mlae_kernel(double* data, int nAll,
 #pragma region rqae
 
 __device__ double mleForRqaeLog(int length,
-	int* Ms, int* Hs, double* etaPows, int precision, double* cosCache) {
-	int sameBysCount = 0, est = 0;
+	int* Ms, int* Hs, int precision, double* etaPows, double* cosCache) {
+	int est = 0;
 	double maxLogP = -__DBL_MAX__;
 	for (int testIdx = 0; testIdx <= precision; testIdx++)
 	{
 		double iAngle = asin(sqrt((double)testIdx / precision)), logP = 0;
 		for (int t = 0; t < length; t++)
 		{
+			double p1 = (1 - etaPows[Ms[t]] * cosCache[(precision + 1) * Ms[t] + testIdx]) / 2;
 			logP += log(
-				Hs[t]       * ((1 - etaPows[Ms[t]] * cosCache[(precision + 1) * Ms[t] + testIdx]) / 2) +
-				(1 - Hs[t]) * ((1 + etaPows[Ms[t]] * cosCache[(precision + 1) * Ms[t] + testIdx]) / 2)
+				Hs[t]       * p1 +
+				(1 - Hs[t]) * (1 - p1)
 			);
 		}
 		if (logP > maxLogP) {
 			est = testIdx;
 			maxLogP = logP;
-			sameBysCount = 1;
+			// sameBysCount = 1;
 		}
-		else if (logP == maxLogP) {
-			est = (est * sameBysCount + (double)testIdx / precision);
-			est /= ++sameBysCount;
-		}
+		// else if (logP == maxLogP) {
+		// 	est = (est * sameBysCount + (double)testIdx / precision);
+		// 	est /= ++sameBysCount;
+		// }
 	}
 	return (double)est / precision;
 }
 
 __global__ void rqae_kernel(double* data, int nAll,
-	int length, int* Ms, double* etaPows, int precision, int* freeMem, double* cosCache)
+	int length, int* Ms, int precision, int* freeMem, double* etaPows, double* cosCache)
 {
 	int kernelIdx = threadIdx.x + blockIdx.x * blockDim.x;
     curandState ref_rd, * rd = &ref_rd;
@@ -375,7 +399,7 @@ __global__ void rqae_kernel(double* data, int nAll,
 		{
 			Hs[t] = oneShot(0.5 * (1 - etaPows[Ms[t]] * cos(2 * angle * Ms[t])), rd);
 		}
-		data[dataIdx] = mleForRqaeLog(length, Ms, Hs, etaPows, precision, cosCache);
+		data[dataIdx] = mleForRqaeLog(length, Ms, Hs, precision, etaPows, cosCache);
 	}
 }
 
@@ -409,7 +433,7 @@ extern "C" __declspec(dllexport) void call_rqae_kernel(double* data, int nAll,
 		}
 	}
 
-	rqae_kernel __KERNEL_ARGS__ (d_data, nAll, length, d_Ms, d_etas, precision, freeMem, d_cosCache);
+	rqae_kernel __KERNEL_ARGS__ (d_data, nAll, length, d_Ms, precision, freeMem, d_etas, d_cosCache);
 	checkCudaErrors(cudaMemcpy(data, d_data, sizeof(double) * nAll, cudaMemcpyDeviceToHost));
 	checkCudaErrors(cudaDeviceReset());
 }
